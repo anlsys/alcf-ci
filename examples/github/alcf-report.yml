@@ -1,0 +1,37 @@
+name: ALCF CI report
+
+# Called by the pipeline webhook of the ALCF GitLab mirror; sets the commit status of the
+# commit the pipeline tested. Copy to .github/workflows/alcf-report.yml (the webhook URL and
+# alcf.yml refer to this file name). See https://github.com/anlsys/alcf-ci.
+#
+# To (re-)report a pipeline by hand, e.g. after a lost webhook delivery:
+#   gh workflow run alcf-report.yml -f pipeline_id=<id>
+
+on:
+  workflow_dispatch:
+    inputs:
+      pipeline_id:
+        description: ALCF GitLab pipeline id
+        required: true
+        type: string
+      status:
+        description: Pipeline status as sent by the GitLab webhook (leave empty)
+        required: false
+        type: string
+
+run-name: ALCF pipeline ${{ inputs.pipeline_id }} ${{ inputs.status }}
+
+permissions:
+  statuses: write
+
+jobs:
+  alcf:
+    uses: anlsys/alcf-ci/.github/workflows/report.yml@v1
+    with:
+      pipeline_id: ${{ inputs.pipeline_id }}
+      status: ${{ inputs.status }}
+      gitlab_project: <gitlab-user>/<gitlab-project>
+      context: ALCF / Aurora
+    secrets:
+      gitlab_token: ${{ secrets.ALCF_GITLAB_TOKEN }}
+      trigger_token: ${{ secrets.ALCF_GITLAB_TRIGGER_TOKEN }}

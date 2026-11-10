@@ -1,0 +1,39 @@
+# ALCF GitLab CI: the test suite on Aurora. Copy to the root of the repository as .gitlab-ci.yml.
+#
+# This file only does something on the ALCF GitLab mirror of the repository; GitHub ignores it.
+# .github/workflows/alcf.yml starts the pipeline and .github/workflows/alcf-report.yml reports the
+# result as a commit status. See https://github.com/anlsys/alcf-ci.
+
+include:
+  - remote: 'https://raw.githubusercontent.com/anlsys/alcf-ci/v1/gitlab/aurora-julia.yml'
+
+variables:
+  JULIA_VERSION: "1.13"
+  # One depot per project and Julia version, on a filesystem the compute nodes mount.
+  JULIA_DEPOT_PATH: /lus/flare/projects/<allocation>/<user>/ci/<package>_julia_depot-1.13
+
+build:
+  extends: .aurora-julia-build
+  script:
+    # Manifests are usually gitignored, so the test environment is resolved here, with the package
+    # dev'ed at the checkout (a plain instantiate would test the registry release), and the manifest
+    # travels to the test job as an artifact.
+    - julia --color=yes --project=. -e 'using Pkg; Pkg.instantiate()'
+    - julia --color=yes --project=test -e 'using Pkg; Pkg.develop(path="."); Pkg.instantiate(); Pkg.precompile()'
+  artifacts:
+    paths:
+      - test/Project.toml
+      - test/Manifest.toml
+    expire_in: 1 week
+
+test:
+  extends: .aurora-julia-test
+  needs: ["build"]
+  variables:
+    ANL_AURORA_SCHEDULER_PARAMETERS: "-A <allocation> -q debug -l select=1,walltime=01:00:00,filesystems=home:flare,place=scatter"
+  script:
+    # Only for packages on top of oneAPI.jl:
+    # - !reference [.aurora-drop-site-oneapi, script]
+    # test/runtests.jl directly rather than Pkg.test, which would resolve a fresh sandbox
+    # environment and needs the network.
+    - julia -C "$JULIA_JIT_TARGET" --color=yes --project=test test/runtests.jl

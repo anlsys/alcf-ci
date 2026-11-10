@@ -1,0 +1,26 @@
+name: ALCF CI
+
+# Starts a pipeline on the ALCF GitLab mirror of this repository and sets the commit status
+# to pending; alcf-report.yml sets the result. Copy to .github/workflows/alcf.yml.
+# See https://github.com/anlsys/alcf-ci.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  pull_request_target:
+    types: [labeled]  # the `alcf-ci` label runs a pull request from a fork
+
+permissions:
+  statuses: write  # the pending status
+  actions: write   # dispatching alcf-report.yml for an already finished pipeline
+
+jobs:
+  alcf:
+    uses: anlsys/alcf-ci/.github/workflows/trigger.yml@v1
+    with:
+      gitlab_project: <gitlab-user>/<gitlab-project>
+      context: ALCF / Aurora
+    secrets:
+      gitlab_token: ${{ secrets.ALCF_GITLAB_TOKEN }}
+      trigger_token: ${{ secrets.ALCF_GITLAB_TRIGGER_TOKEN }}

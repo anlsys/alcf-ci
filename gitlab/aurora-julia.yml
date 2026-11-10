@@ -1,0 +1,92 @@
+# ALCF GitLab CI template: a Julia package tested on Aurora.
+#
+# Include it from a project's .gitlab-ci.yml (see examples/gitlab/.gitlab-ci.yml and the README):
+#
+#   include:
+#     - remote: 'https://raw.githubusercontent.com/anlsys/alcf-ci/v1/gitlab/aurora-julia.yml'
+#
+# The project sets JULIA_VERSION and JULIA_DEPOT_PATH as global variables and defines its jobs by
+# extending `.aurora-julia-build` (login node, has network) and `.aurora-julia-test` (PBS batch job,
+# no network). Everything here can be overridden by the including file.
+#
+# Layout: the Aurora PBS debug queues cap walltime at 1 h, so everything that doesn't need a GPU —
+# package instantiation and precompilation — runs on the login-node shell runner into a persistent
+# depot on a shared filesystem, and only the test run itself goes through PBS.
+
+include:
+  - project: 'anl/ci-resources/defaults'
+    ref: main
+    file: ['/runners.yml']
+
+workflow:
+  rules:
+    # "push" is what a mirror sync creates. "trigger" covers fork pull requests and re-runs, created
+    # through a pipeline trigger token by the GitHub trigger workflow so that they run as a real user
+    # instead of the project access token's bot (which the Jacamar runners refuse).
+    - if: $CI_PIPELINE_SOURCE == "push" || $CI_PIPELINE_SOURCE == "web" || $CI_PIPELINE_SOURCE == "api" || $CI_PIPELINE_SOURCE == "trigger"
+
+default:
+  interruptible: true  # force-pushes cancel stale runs instead of queueing behind them
+
+variables:
+  # Global rather than per job: the CPU target must be identical in every job or the batch job
+  # rebuilds the package images the build job precompiled (icelake = login nodes, sapphirerapids =
+  # compute nodes, -avx512fp16 = workaround for a host Float16 miscompile with AVX512-FP16).
+  JULIA_CPU_TARGET: "generic;icelake-server;sapphirerapids,-avx512fp16"
+  # Single-target variant for the runtime JIT (`julia -C "$JULIA_JIT_TARGET"`): multi-target strings
+  # are image-only syntax and are rejected at runtime. JULIA_CPU_TARGET selects package images but
+  # does not constrain the JIT, so pass -C wherever the Float16 workaround matters.
+  JULIA_JIT_TARGET: "native,-avx512fp16"
+
+stages: [build, test]
+
+# Loads the site Julia module. The project must set, as *global* variables,
+#   JULIA_VERSION     the site module version, e.g. "1.13"
+#   JULIA_DEPOT_PATH  a persistent depot on a shared filesystem, one per project and Julia version
+# JULIA_DEPOT_PATH has to be global and not exported in a script: a ~/.bashrc that loads a julia
+# module can warn on stdout when it is unset, which corrupts the PBS job id that Jacamar parses from
+# qsub.
+.aurora-env:
+  script:
+    - ': "${JULIA_VERSION:?set JULIA_VERSION as a global variable in .gitlab-ci.yml}"'
+    - ': "${JULIA_DEPOT_PATH:?set JULIA_DEPOT_PATH as a global variable in .gitlab-ci.yml}"'
+    # errexit off across the site profile: profile.d scripts reference unset variables and return
+    # non-zero freely.
+    - set +eu; source /etc/profile >/dev/null 2>&1; module load julia/$JULIA_VERSION >/dev/null 2>&1; set -eu
+    - command -v julia || { echo "ERROR no julia on PATH after site profile" >&2; exit 1; }
+    - julia --version; echo "depot=$JULIA_DEPOT_PATH"
+
+# For packages whose SYCL runtime comes from Julia artifacts or Conda (oneAPI.jl and everything on
+# top of it): LD_LIBRARY_PATH wins over RUNPATH, so the site oneAPI module would substitute its own
+# libur_adapter_level_zero/libumf underneath the packaged libsycl, and a version mismatch aborts in
+# sycl::platform::get_platforms. Drops the site oneAPI entries. Use in a test job with
+#   - !reference [.aurora-drop-site-oneapi, script]
+.aurora-drop-site-oneapi:
+  script:
+    - export LD_LIBRARY_PATH="$(echo "${LD_LIBRARY_PATH:-}" | tr ':' '\n' | grep -v '^/opt/aurora/[^/]*/oneapi/' | paste -sd:)"
+
+# Build job on the login node, which has outbound network: instantiate and precompile here so that
+# the 1 h batch job spends its walltime on tests (the compute nodes have no network either). Pass
+# what the test job needs (e.g. test/Manifest.toml) as artifacts.
+#
+# Both job templates share one resource group, so a project's pipelines are serialized: a build must
+# not touch the depot while a test job reads it, and the debug queues admit a single queued job per
+# user (a second qsub is refused, which Jacamar reports as a plain script failure).
+.aurora-julia-build:
+  stage: build
+  extends: .aurora-shell-runner
+  timeout: 2h
+  resource_group: aurora-ci
+  before_script:
+    - !reference [.aurora-env, script]
+
+# Test job in a PBS batch job. The project sets ANL_AURORA_SCHEDULER_PARAMETERS (account, queue,
+# resources), e.g.
+#   "-A <account> -q debug -l select=1,walltime=01:00:00,filesystems=home:flare,place=scatter"
+.aurora-julia-test:
+  stage: test
+  extends: .aurora-batch-runner
+  timeout: 5h  # must cover the PBS queue wait, not just the walltime
+  resource_group: aurora-ci
+  before_script:
+    - !reference [.aurora-env, script]
